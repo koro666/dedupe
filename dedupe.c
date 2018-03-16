@@ -86,10 +86,6 @@ static bool hash_default_equals(void*, void*);
 static bool is_prime(size_t);
 static size_t next_prime(size_t);
 
-static void talloc_pfree_char(char**);
-static void talloc_pfree_pphash_bucket(struct hash_bucket***);
-static void pclosedir(DIR**);
-
 static struct hash_descriptor hash_default_descriptor =
 {
 	hash_default_hash,
@@ -202,7 +198,6 @@ static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, cha
 		return;
 	}
 
-	__attribute__((cleanup(pclosedir)))
 	DIR* d = fdopendir(fd);
 	if (!d)
 	{
@@ -217,12 +212,12 @@ static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, cha
 		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
 			continue;
 
-		__attribute__((cleanup(talloc_pfree_char)))
 		char* fullpath = talloc_asprintf(dpath, "%s/%s", dpath, e->d_name);
 
 		if (e->d_type == DT_DIR)
 		{
 			scan_directory(state, fd, fullpath, e->d_name);
+			talloc_free(fullpath);
 		}
 		else if (e->d_type == DT_REG)
 		{
@@ -241,6 +236,7 @@ static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, cha
 				{
 					perror(fullpath);
 					talloc_free(ientry);
+					talloc_free(fullpath);
 					continue;
 				}
 
@@ -252,9 +248,11 @@ static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, cha
 			ientry->paths = pentry;
 
 			pentry->path = fullpath;
-			talloc_move(pentry, &fullpath);
+			talloc_steal(pentry, fullpath);
 		}
 	}
+
+	closedir(d);
 }
 
 static void bucketize_by_size(void* state0, struct hash_bucket* inode_bucket)
@@ -343,7 +341,6 @@ static void hash_map_rehash(struct hash_map* map)
 	size_t bucket_count_old = map->bucket_count;
 	map->bucket_count = next_prime(map->item_count * 2);
 
-	__attribute__((cleanup(talloc_pfree_pphash_bucket)))
 	struct hash_bucket** buckets_old = map->buckets;
 	map->buckets = talloc_zero_array(map, struct hash_bucket*, map->bucket_count);
 
@@ -362,6 +359,8 @@ static void hash_map_rehash(struct hash_map* map)
 			map->buckets[bucket] = current;
 		}
 	}
+
+	talloc_free(buckets_old);
 }
 
 static void hash_map_walk(struct hash_map* map, void* context, void(*cb)(void*, struct hash_bucket*))
@@ -424,20 +423,4 @@ static size_t next_prime(size_t x)
 		i ^= 6;
 
 	return x;
-}
-
-static void talloc_pfree_char(char** pp)
-{
-	talloc_free(*pp);
-}
-
-static void talloc_pfree_pphash_bucket(struct hash_bucket*** pp)
-{
-	talloc_free(*pp);
-}
-
-static void pclosedir(DIR** pd)
-{
-	if (*pd)
-		closedir(*pd);
 }
