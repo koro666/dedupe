@@ -73,7 +73,7 @@ struct path_entry
 
 static int parse_cmdline(struct dedupe_state*, int, char**);
 static void check_terminal(struct dedupe_state*);
-static void scan_directory(struct dedupe_state*, char*);
+static void scan_directory(struct dedupe_state*, int, char*, char*);
 static void bucketize_by_size(void*, struct hash_bucket*);
 static void print_progress(struct dedupe_state*, const char*, int, int);
 
@@ -110,7 +110,7 @@ int main(int argc, char** argv)
 	state->inode_lookup = hash_map_create(state, &hash_default_descriptor, 0);
 
 	for (size_t i = 0; i < state->dircount; ++i)
-		scan_directory(state, state->dirs[i]);
+		scan_directory(state, AT_FDCWD, state->dirs[i], state->dirs[i]);
 
 	state->size_lookup = hash_map_create(state, &hash_default_descriptor, state->inode_lookup->item_count);
 	hash_map_walk(state->inode_lookup, state, bucketize_by_size);
@@ -191,19 +191,26 @@ static void check_terminal(struct dedupe_state* state)
 	state->last = ts.tv_sec;
 }
 
-static void scan_directory(struct dedupe_state* state, char* directory)
+static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, char* dname)
 {
-	print_progress(state, directory, 0, -1);
+	print_progress(state, dpath, 0, -1);
 
-	__attribute__((cleanup(pclosedir)))
-	DIR* d = opendir(directory);
-	if (!d)
+	int fd = openat(pfd, dname, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
+	if (fd == -1)
 	{
-		perror(directory);
+		perror(dpath);
 		return;
 	}
 
-	int fd = dirfd(d);
+	__attribute__((cleanup(pclosedir)))
+	DIR* d = fdopendir(fd);
+	if (!d)
+	{
+		perror(dpath);
+		close(fd);
+		return;
+	}
+
 	struct dirent* e;
 	while ((e = readdir(d)))
 	{
@@ -211,11 +218,11 @@ static void scan_directory(struct dedupe_state* state, char* directory)
 			continue;
 
 		__attribute__((cleanup(talloc_pfree_char)))
-		char* fullpath = talloc_asprintf(directory, "%s/%s", directory, e->d_name);
+		char* fullpath = talloc_asprintf(dpath, "%s/%s", dpath, e->d_name);
 
 		if (e->d_type == DT_DIR)
 		{
-			scan_directory(state, fullpath);
+			scan_directory(state, fd, fullpath, e->d_name);
 		}
 		else if (e->d_type == DT_REG)
 		{
