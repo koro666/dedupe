@@ -1,4 +1,5 @@
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -14,6 +15,11 @@
 #include <getopt.h>
 #include <time.h>
 #include <talloc.h>
+#ifdef __FreeBSD__
+#include <sha256.h>
+#else
+#include <openssl/sha.h>
+#endif
 
 struct dedupe_state
 {
@@ -88,7 +94,8 @@ static void bucketize_by_size(void*, struct hash_bucket*);
 static void gather_tohash(struct dedupe_state*);
 static void gather_tohash_walkcb(void*, struct hash_bucket*);
 static int gather_tohash_sortcb(const void*, const void*);
-static void print_progress(struct dedupe_state*, const char*, int, int);
+static void hash_inode(struct dedupe_state*, size_t, struct inode_entry*);
+static void print_progress(struct dedupe_state*, const char*, size_t, size_t);
 
 static struct hash_map* hash_map_create(void*, const struct hash_descriptor*, size_t);
 static struct hash_bucket* hash_map_insert(struct hash_map*, void*);
@@ -128,20 +135,17 @@ int main(int argc, char** argv)
 	check_terminal(state);
 
 	state->inode_lookup = hash_map_create(state, &hash_ptr_descriptor, 0);
-
 	for (size_t i = 0; i < state->dircount; ++i)
 		scan_directory(state, AT_FDCWD, state->dirs[i], state->dirs[i]);
 
 	state->size_lookup = hash_map_create(state, &hash_ptr_descriptor, state->inode_lookup->item_count);
 	hash_map_walk(state->inode_lookup, state, bucketize_by_size);
-	talloc_free(state->inode_lookup);
-	state->inode_lookup = NULL;
 
 	gather_tohash(state);
-	talloc_free(state->size_lookup);
-	state->size_lookup = NULL;
 
 	state->hash_lookup = hash_map_create(state, &hash_buf32_descriptor, state->tohash_count);
+	for (size_t i = 0; i < state->tohash_count; ++i)
+		hash_inode(state, i, state->tohash_list[i]);
 
 	// TODO:
 
@@ -344,7 +348,48 @@ static int gather_tohash_sortcb(const void* p1, const void* p2)
 		return 0;
 }
 
-static void print_progress(struct dedupe_state* state, const char* status, int count, int max)
+static void hash_inode(struct dedupe_state* state, size_t progress, struct inode_entry* inode)
+{
+	int fd = -1;
+	char* fpath = NULL;
+	for (struct path_entry* path = inode->paths; path; path = path->next)
+	{
+		fpath = path->path;
+		fd = open(fpath, O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+		if (fd != -1)
+			break;
+	}
+
+	if (fd == -1)
+	{
+		fprintf(stderr, "#%lu: Cannot open any path", (unsigned long)inode->buffer.st_ino);
+		return;
+	}
+
+	print_progress(state, fpath, progress, state->tohash_count);
+
+	void* data = mmap(NULL, inode->buffer.st_size, PROT_READ, MAP_SHARED, fd, 0);
+	if (data == MAP_FAILED)
+	{
+		perror(fpath);
+		close(fd);
+		return;
+	}
+
+	SHA256_CTX ctx;
+	SHA256_Init(&ctx);
+	SHA256_Update(&ctx, data, inode->buffer.st_size);
+	SHA256_Final(inode->hash, &ctx);
+
+	munmap(data, inode->buffer.st_size);
+	close(fd);
+
+	struct hash_bucket* bucket = hash_map_insert(state->hash_lookup, inode->hash);
+	inode->next_by_hash = bucket->value;
+	bucket->value = inode;
+}
+
+static void print_progress(struct dedupe_state* state, const char* status, size_t count, size_t max)
 {
 	if (!state->verbose)
 		return;
@@ -355,19 +400,19 @@ static void print_progress(struct dedupe_state* state, const char* status, int c
 	if (state->last == ts.tv_sec)
 		return;
 
-	bool progress = max > 0;
+	bool progress = max != -1;
 	if (state->tty)
 	{
 		// TODO: Render fancy ANSI-colored progress bar
 		if (progress)
-			printf("\e[K[%d/%d] %s\r", count, max, status);
+			printf("\e[K[%zu/%zu] %s\r", count, max, status);
 		else
 			printf("\e[K%s\r", status);
 	}
 	else
 	{
 		if (progress)
-			printf("[%d/%d] %s\n", count, max, status);
+			printf("[%zu/%zu] %s\n", count, max, status);
 		else
 			printf("%s\n", status);
 	}

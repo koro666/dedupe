@@ -12,15 +12,13 @@ ifeq ($(UNAME), Linux)
 CFLAGS+=-D_GNU_SOURCE
 endif
 
-CFLAGS+=$(shell pkg-config --cflags talloc)
-LDFLAGS+=$(shell pkg-config --libs-only-other talloc)
-LDFLAGS+=$(shell pkg-config --libs-only-L talloc)
-
 ifeq ($(UNAME), FreeBSD)
 LDLIBS=-lmd
+else
+LDLIBS+=-lcrypto
 endif
 
-LDLIBS+=$(shell pkg-config --libs-only-l talloc)
+LDLIBS+=-ltalloc
 
 .PHONY: build rebuild clean
 
