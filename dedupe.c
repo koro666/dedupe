@@ -30,7 +30,17 @@ struct dedupe_state
 
 	struct hash_map* inode_lookup;
 	struct hash_map* size_lookup;
+
+	size_t tohash_count;
+	struct inode_entry** tohash_list;
+
 	struct hash_map* hash_lookup;
+};
+
+struct gather_tohash_state
+{
+	struct dedupe_state* state0;
+	size_t capacity;
 };
 
 struct hash_map
@@ -75,21 +85,35 @@ static int parse_cmdline(struct dedupe_state*, int, char**);
 static void check_terminal(struct dedupe_state*);
 static void scan_directory(struct dedupe_state*, int, char*, char*);
 static void bucketize_by_size(void*, struct hash_bucket*);
+static void gather_tohash(struct dedupe_state*);
+static void gather_tohash_walkcb(void*, struct hash_bucket*);
+static int gather_tohash_sortcb(const void*, const void*);
 static void print_progress(struct dedupe_state*, const char*, int, int);
 
 static struct hash_map* hash_map_create(void*, const struct hash_descriptor*, size_t);
 static struct hash_bucket* hash_map_insert(struct hash_map*, void*);
 static void hash_map_rehash(struct hash_map*);
 static void hash_map_walk(struct hash_map*, void*, void(*)(void*, struct hash_bucket*));
-static size_t hash_default_hash(void*);
-static bool hash_default_equals(void*, void*);
+
+static size_t hash_ptr_hash(void*);
+static bool hash_ptr_equals(void*, void*);
+
+static size_t hash_buf32_hash(void*);
+static bool hash_buf32_equals(void*, void*);
+
 static bool is_prime(size_t);
 static size_t next_prime(size_t);
 
-static struct hash_descriptor hash_default_descriptor =
+static struct hash_descriptor hash_ptr_descriptor =
 {
-	hash_default_hash,
-	hash_default_equals
+	hash_ptr_hash,
+	hash_ptr_equals
+};
+
+static struct hash_descriptor hash_buf32_descriptor =
+{
+	hash_buf32_hash,
+	hash_buf32_equals
 };
 
 int main(int argc, char** argv)
@@ -103,15 +127,21 @@ int main(int argc, char** argv)
 
 	check_terminal(state);
 
-	state->inode_lookup = hash_map_create(state, &hash_default_descriptor, 0);
+	state->inode_lookup = hash_map_create(state, &hash_ptr_descriptor, 0);
 
 	for (size_t i = 0; i < state->dircount; ++i)
 		scan_directory(state, AT_FDCWD, state->dirs[i], state->dirs[i]);
 
-	state->size_lookup = hash_map_create(state, &hash_default_descriptor, state->inode_lookup->item_count);
+	state->size_lookup = hash_map_create(state, &hash_ptr_descriptor, state->inode_lookup->item_count);
 	hash_map_walk(state->inode_lookup, state, bucketize_by_size);
 	talloc_free(state->inode_lookup);
 	state->inode_lookup = NULL;
+
+	gather_tohash(state);
+	talloc_free(state->size_lookup);
+	state->size_lookup = NULL;
+
+	state->hash_lookup = hash_map_create(state, &hash_buf32_descriptor, state->tohash_count);
 
 	// TODO:
 
@@ -266,6 +296,54 @@ static void bucketize_by_size(void* state0, struct hash_bucket* inode_bucket)
 	size_bucket->value = ientry;
 }
 
+static void gather_tohash(struct dedupe_state* state0)
+{
+	struct gather_tohash_state state1 = { state0, 16 };
+
+	state0->tohash_count = 0;
+	state0->tohash_list = talloc_array(state0, struct inode_entry*, state1.capacity);
+
+	hash_map_walk(state0->size_lookup, &state1, gather_tohash_walkcb);
+	qsort(state0->tohash_list, state0->tohash_count, sizeof(struct inode_entry*), gather_tohash_sortcb);
+}
+
+static void gather_tohash_walkcb(void* state0, struct hash_bucket* size_bucket)
+{
+	if (size_bucket->dummy < 2)
+		return;
+
+	struct gather_tohash_state* state1 = state0;
+	struct dedupe_state* state2 = state1->state0;
+
+	for (struct inode_entry* inode = size_bucket->value; inode; inode = inode->next_by_size)
+	{
+		if (state1->capacity == state2->tohash_count)
+		{
+			state1->capacity *= 2;
+			state2->tohash_list = talloc_realloc(state2, state2->tohash_list, struct inode_entry*, state1->capacity);
+		}
+
+		state2->tohash_list[state2->tohash_count++] = inode;
+	}
+}
+
+static int gather_tohash_sortcb(const void* p1, const void* p2)
+{
+	struct inode_entry
+		*inode0 = *((struct inode_entry* const*)p1),
+		*inode1 = *((struct inode_entry* const*)p2);
+
+	off_t sz0 = inode0->buffer.st_size,
+		sz1 = inode1->buffer.st_size;
+
+	if (sz0 < sz1)
+		return -1;
+	else if (sz0 > sz1)
+		return 1;
+	else
+		return 0;
+}
+
 static void print_progress(struct dedupe_state* state, const char* status, int count, int max)
 {
 	if (!state->verbose)
@@ -372,14 +450,27 @@ static void hash_map_walk(struct hash_map* map, void* context, void(*cb)(void*, 
 	}
 }
 
-static size_t hash_default_hash(void* p)
+static size_t hash_ptr_hash(void* p)
 {
 	return (size_t)p;
 }
 
-static bool hash_default_equals(void* p1, void* p2)
+static bool hash_ptr_equals(void* p1, void* p2)
 {
 	return p1 == p2;
+}
+
+static size_t hash_buf32_hash(void* p)
+{
+	size_t result = 0;
+	for (size_t *current = p, *end = ((size_t*)p) + (32 / sizeof(size_t)); current < end; ++current)
+		result ^= *current;
+	return result;
+}
+
+static bool hash_buf32_equals(void* p1, void* p2)
+{
+	return !memcmp(p1, p2, 32);
 }
 
 // https://stackoverflow.com/a/5694432 impl #5
