@@ -25,7 +25,7 @@ struct dedupe_state
 {
 	bool verbose;
 	bool dryrun;
-	bool relaxed;
+	bool interactive;
 
 	dev_t device;
 	size_t dircount;
@@ -42,9 +42,12 @@ struct dedupe_state
 	struct inode_entry** tohash_list;
 
 	struct hash_map* hash_lookup;
+
+	size_t tolink_count;
+	struct hash_bucket** tolink_list;
 };
 
-struct gather_tohash_state
+struct gather_state
 {
 	struct dedupe_state* state0;
 	size_t capacity;
@@ -96,6 +99,11 @@ static void gather_tohash(struct dedupe_state*);
 static void gather_tohash_walkcb(void*, struct hash_bucket*);
 static int gather_tohash_sortcb(const void*, const void*);
 static void hash_inode(struct dedupe_state*, size_t, struct inode_entry*);
+static void gather_tolink(struct dedupe_state*);
+static void gather_tolink_walkcb(void*, struct hash_bucket*);
+static int gather_tolink_sortcb(const void*, const void*);
+static void relink(struct dedupe_state*, struct hash_bucket*);
+static int relink_sortcb(const void*, const void*);
 static void print_progress(struct dedupe_state*, const char*, size_t, size_t);
 
 static struct hash_map* hash_map_create(void*, const struct hash_descriptor*, size_t);
@@ -160,7 +168,10 @@ int main(int argc, char** argv)
 		fflush(stdout);
 	}
 
-	// TODO:
+	gather_tolink(state);
+
+	for (size_t i = 0; i < state->tolink_count; ++i)
+		relink(state, state->tolink_list[i]);
 
 	return 0;
 }
@@ -171,7 +182,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	{
 		{"verbose", no_argument, NULL, 'v'},
 		{"dry-run", no_argument, NULL, 'n'},
-		{"relaxed", no_argument, NULL, 'x'},
+		{"interactive", no_argument, NULL, 'i'},
 		{}
 	};
 
@@ -180,7 +191,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	memcpy(nargv, argv, argsz);
 
 	int result, index;
-	while ((result = getopt_long(argc, nargv, "vnx", long_options, &index)) != -1)
+	while ((result = getopt_long(argc, nargv, "vni", long_options, &index)) != -1)
 	{
 		switch (result)
 		{
@@ -190,8 +201,8 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 			case 'n':
 				state->dryrun = 1;
 				break;
-			case 'x':
-				state->relaxed = 1;
+			case 'i':
+				state->interactive = 1;
 				break;
 			default:
 				return 1;
@@ -329,7 +340,7 @@ static void bucketize_by_size(void* state0, struct hash_bucket* inode_bucket)
 
 static void gather_tohash(struct dedupe_state* state0)
 {
-	struct gather_tohash_state state1 = { state0, 16 };
+	struct gather_state state1 = { state0, 16 };
 
 	state0->tohash_count = 0;
 	state0->tohash_list = talloc_array(state0, struct inode_entry*, state1.capacity);
@@ -343,7 +354,7 @@ static void gather_tohash_walkcb(void* state0, struct hash_bucket* size_bucket)
 	if (size_bucket->dummy < 2)
 		return;
 
-	struct gather_tohash_state* state1 = state0;
+	struct gather_state* state1 = state0;
 	struct dedupe_state* state2 = state1->state0;
 
 	for (struct inode_entry* inode = size_bucket->value; inode; inode = inode->next_by_size)
@@ -377,6 +388,14 @@ static int gather_tohash_sortcb(const void* p1, const void* p2)
 
 static void hash_inode(struct dedupe_state* state, size_t progress, struct inode_entry* inode)
 {
+	if (!inode->buffer.st_size)
+	{
+		SHA256_CTX ctx;
+		SHA256_Init(&ctx);
+		SHA256_Final(inode->hash, &ctx);
+		return;
+	}
+
 	int fd = -1;
 	char* fpath = NULL;
 	for (struct path_entry* path = inode->paths; path; path = path->next)
@@ -412,8 +431,130 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 	close(fd);
 
 	struct hash_bucket* bucket = hash_map_insert(state->hash_lookup, inode->hash);
+	++bucket->dummy;
 	inode->next_by_hash = bucket->value;
 	bucket->value = inode;
+}
+
+static void gather_tolink(struct dedupe_state* state0)
+{
+	struct gather_state state1 = { state0, 16 };
+
+	state0->tolink_count = 0;
+	state0->tolink_list = talloc_array(state0, struct hash_bucket*, state1.capacity);
+
+	hash_map_walk(state0->hash_lookup, &state1, gather_tolink_walkcb);
+	qsort(state0->tolink_list, state0->tolink_count, sizeof(struct hash_bucket*), gather_tolink_sortcb);
+}
+
+static void gather_tolink_walkcb(void* state0, struct hash_bucket* bucket)
+{
+	if (bucket->dummy < 2)
+		return;
+
+	struct gather_state* state1 = state0;
+	struct dedupe_state* state2 = state1->state0;
+
+	if (state1->capacity == state2->tolink_count)
+	{
+		state1->capacity *= 2;
+		state2->tolink_list = talloc_realloc(state2, state2->tolink_list, struct hash_bucket*, state1->capacity);
+	}
+
+	state2->tolink_list[state2->tolink_count++] = bucket;
+}
+
+static int gather_tolink_sortcb(const void* p1, const void* p2)
+{
+	struct hash_bucket
+		*bucket0 = *((struct hash_bucket* const*)p1),
+		*bucket1 = *((struct hash_bucket* const*)p2);
+
+	return memcmp(bucket0->key, bucket1->key, 32);
+}
+
+static void relink(struct dedupe_state* state, struct hash_bucket* bucket)
+{
+	struct inode_entry** ordered = alloca(bucket->dummy * sizeof(struct inode_entry*));
+	size_t i = 0;
+	for (struct inode_entry* inode = bucket->value; inode; inode = inode->next_by_hash)
+		ordered[i++] = inode;
+	qsort(ordered, bucket->dummy, sizeof(struct inode_entry*), relink_sortcb);
+
+	if (state->verbose || state->interactive)
+	{
+		char buffer[65];
+		unsigned char* key = bucket->key;
+
+		for (size_t i = 0; i < 32; ++i)
+			snprintf(buffer + (i * 2), 3, "%02x", (int)key[i]);
+
+		printf(state->tty ? "\e[1mDuplicate \e[31m%s\e[39m:\e[0m\n" : "Duplicate %s:\n", buffer);
+
+		for (i = 0; i < bucket->dummy; ++i)
+		{
+			struct tm tm;
+			localtime_r(&ordered[i]->buffer.st_mtim.tv_sec, &tm);
+
+			strftime(buffer, 65, "%c", &tm);
+
+			printf(
+				state->tty ?
+					" \e[1m#%lu\e[0m (%lu bytes) \e[2mmodified %s\e[0m\n" :
+					" #%lu (%lu bytes) modified %s\n",
+				(unsigned long)ordered[i]->buffer.st_ino,
+				(unsigned long)ordered[i]->buffer.st_size,
+				buffer
+			);
+
+			for (struct path_entry* path = ordered[i]->paths; path; path = path->next)
+				printf("  %s\n", path->path);
+		}
+	}
+
+	if (state->interactive)
+	{
+		while (true)
+		{
+			fputs(state->tty ? " \e[1mRelink? [\e[32myes\e[39m/\e[31mno\e[39m]\e[0m " : " Relink? [yes/no] ", stdout);
+			fflush(stdout);
+
+			char buffer[4096];
+			fgets(buffer, 4096, stdin);
+
+			if (!strcmp(buffer, "y\n") || !strcmp(buffer, "yes\n"))
+				break;
+			else if (!strcmp(buffer, "n\n") || !strcmp(buffer, "no\n"))
+				return;
+		}
+	}
+
+	if (state->dryrun)
+		return;
+
+	// TODO:
+}
+
+static int relink_sortcb(const void* p1, const void* p2)
+{
+	struct inode_entry
+		*inode0 = *((struct inode_entry* const*)p1),
+		*inode1 = *((struct inode_entry* const*)p2);
+
+	struct timespec
+		*mt0 = &inode0->buffer.st_mtim,
+		*mt1 = &inode1->buffer.st_mtim;
+
+	if (mt0->tv_sec < mt1->tv_sec)
+		return -1;
+	else if (mt0->tv_sec > mt1->tv_sec)
+		return 1;
+	else if (mt0->tv_nsec < mt1->tv_nsec)
+		return -1;
+	else if (mt0->tv_nsec > mt1->tv_nsec)
+		return 1;
+	else
+		return 0;
 }
 
 static void print_progress(struct dedupe_state* state, const char* status, size_t count, size_t max)
