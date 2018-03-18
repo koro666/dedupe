@@ -13,6 +13,8 @@ CFLAGS+=-D_GNU_SOURCE
 endif
 
 ifeq ($(UNAME), FreeBSD)
+CFLAGS+=-Wno-int-to-void-pointer-cast -I/usr/local/include
+LDFLAGS+=-L/usr/local/lib
 LDLIBS=-lmd
 else
 LDLIBS+=-lcrypto
