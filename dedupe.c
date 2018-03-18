@@ -134,6 +134,12 @@ int main(int argc, char** argv)
 
 	check_terminal(state);
 
+	if (state->verbose && state->tty)
+	{
+		fputs("\n\n\e[2A\e[s", stdout);
+		fflush(stdout);
+	}
+
 	state->inode_lookup = hash_map_create(state, &hash_ptr_descriptor, 0);
 	for (size_t i = 0; i < state->dircount; ++i)
 		scan_directory(state, AT_FDCWD, state->dirs[i], state->dirs[i]);
@@ -147,10 +153,13 @@ int main(int argc, char** argv)
 	for (size_t i = 0; i < state->tohash_count; ++i)
 		hash_inode(state, i, state->tohash_list[i]);
 
-	// TODO:
-
 	if (state->verbose && state->tty)
-		puts("\e[K");
+	{
+		fputs("\e[u\e[J", stdout);
+		fflush(stdout);
+	}
+
+	// TODO:
 
 	return 0;
 }
@@ -403,18 +412,37 @@ static void print_progress(struct dedupe_state* state, const char* status, size_
 	bool progress = max != -1;
 	if (state->tty)
 	{
-		// TODO: Render fancy ANSI-colored progress bar
+		fputs("\e[u\e[J", stdout);
+
 		if (progress)
-			printf("\e[K[%zu/%zu] %s\r", count, max, status);
+		{
+			size_t cmax = (state->width >= 3 ? state->width - 3 : 1);
+			size_t ccount = (count * cmax) / max;
+			size_t cncount = cmax - ccount;
+
+			char *buf0 = alloca(ccount + 1);
+			memset(buf0, 0x7C, ccount);
+			buf0[ccount] = 0;
+
+			char* buf1 = alloca(cncount + 1);
+			memset(buf1, 0x20, cncount);
+			buf1[cncount] = 0;
+
+			printf("\e[0;1m[\e[0;32;42m%s\e[0m%s\e[1m]\n[%zu/%zu]\e[0m ", buf0, buf1, count, max);
+		}
 		else
-			printf("\e[K%s\r", status);
+		{
+			printf("\e[0;1m[%c]\e[0m ", "-\\|/"[ts.tv_sec & 3]);
+		}
+
+		printf("%s\n", status);
 	}
 	else
 	{
 		if (progress)
-			printf("[%zu/%zu] %s\n", count, max, status);
-		else
-			printf("%s\n", status);
+			printf("[%zu/%zu] ", count, max);
+
+		printf("%s\n", status);
 	}
 
 	state->last = ts.tv_sec;
