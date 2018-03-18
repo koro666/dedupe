@@ -23,6 +23,7 @@
 
 struct dedupe_state
 {
+	bool boring;
 	bool verbose;
 	bool dryrun;
 	bool interactive;
@@ -180,6 +181,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 {
 	static const struct option long_options[] =
 	{
+		{"boring", no_argument, NULL, 'b'},
 		{"verbose", no_argument, NULL, 'v'},
 		{"dry-run", no_argument, NULL, 'n'},
 		{"interactive", no_argument, NULL, 'i'},
@@ -191,18 +193,21 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	memcpy(nargv, argv, argsz);
 
 	int result, index;
-	while ((result = getopt_long(argc, nargv, "vni", long_options, &index)) != -1)
+	while ((result = getopt_long(argc, nargv, "bvni", long_options, &index)) != -1)
 	{
 		switch (result)
 		{
+			case 'b':
+				state->boring = true;
+				break;
 			case 'v':
-				state->verbose = 1;
+				state->verbose = true;
 				break;
 			case 'n':
-				state->dryrun = 1;
+				state->dryrun = true;
 				break;
 			case 'i':
-				state->interactive = 1;
+				state->interactive = true;
 				break;
 			default:
 				return 1;
@@ -236,7 +241,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 
 static void check_terminal(struct dedupe_state* state)
 {
-	if ((state->tty = isatty(STDOUT_FILENO)))
+	if (!state->boring && (state->tty = isatty(STDOUT_FILENO)))
 	{
 		struct winsize w;
 		if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) != -1)
