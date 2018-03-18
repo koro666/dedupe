@@ -27,6 +27,7 @@ struct dedupe_state
 	bool dryrun;
 	bool relaxed;
 
+	dev_t device;
 	size_t dircount;
 	char** dirs;
 
@@ -210,6 +211,15 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	if (!state->dircount)
 		state->dirs[state->dircount++] = talloc_strdup(state->dirs, ".");
 
+	struct stat buffer;
+	if (stat(state->dirs[0], &buffer) == -1)
+	{
+		perror(state->dirs[0]);
+		return 1;
+	}
+
+	state->device = buffer.st_dev;
+
 	return 0;
 }
 
@@ -238,6 +248,14 @@ static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, cha
 	if (fd == -1)
 	{
 		perror(dpath);
+		return;
+	}
+
+	struct stat buffer;
+	if (fstat(fd, &buffer) == -1 || (buffer.st_dev == state->device ? false : ((errno = EXDEV), true)))
+	{
+		perror(dpath);
+		close(fd);
 		return;
 	}
 
