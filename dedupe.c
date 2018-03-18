@@ -93,6 +93,7 @@ struct path_entry
 };
 
 static int parse_cmdline(struct dedupe_state*, int, char**);
+static void print_usage(const char*);
 static void check_terminal(struct dedupe_state*);
 static void scan_directory(struct dedupe_state*, int, char*, char*);
 static void bucketize_by_size(void*, struct hash_bucket*);
@@ -185,6 +186,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 		{"verbose", no_argument, NULL, 'v'},
 		{"dry-run", no_argument, NULL, 'n'},
 		{"interactive", no_argument, NULL, 'i'},
+		{"help", no_argument, NULL, 'h'},
 		{}
 	};
 
@@ -193,7 +195,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	memcpy(nargv, argv, argsz);
 
 	int result, index;
-	while ((result = getopt_long(argc, nargv, "bvni", long_options, &index)) != -1)
+	while ((result = getopt_long(argc, nargv, "bvnih?", long_options, &index)) != -1)
 	{
 		switch (result)
 		{
@@ -209,6 +211,10 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 			case 'i':
 				state->interactive = true;
 				break;
+			case 'h':
+			case '?':
+				print_usage(argv[0]);
+				return 1;
 			default:
 				return 1;
 		}
@@ -237,6 +243,22 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	state->device = buffer.st_dev;
 
 	return 0;
+}
+
+static void print_usage(const char* name)
+{
+	printf(
+		"Usage:\n"
+		"  %s [options] [directories]\n"
+		"\n"
+		"Options:\n"
+		"  -b, --boring      Don't output colors on the terminal.\n"
+		"  -v, --verbose     Print directory and file names as they are being scanned.\n"
+		"  -n, --dry-run     Don't do any write operations to the file system.\n"
+		"  -i, -interactive  Ask for confirmation before doing anything.\n"
+		"  -h, -?, --help    Show program usage.\n"
+		"\n",
+		name);
 }
 
 static void check_terminal(struct dedupe_state* state)
