@@ -1,5 +1,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#ifdef __linux__
+#include <sys/random.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -429,15 +432,14 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 	{
 		fpath = path->path;
 		fd = open(fpath, O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
-		if (fd != -1)
+		if (fd == -1)
+			perror(path->path);
+		else
 			break;
 	}
 
 	if (fd == -1)
-	{
-		fprintf(stderr, "#%lu: Cannot open any path", (unsigned long)inode->buffer.st_ino);
 		return;
-	}
 
 	print_progress(state, fpath, progress, state->tohash_count);
 
@@ -513,7 +515,7 @@ static void relink(struct dedupe_state* state, struct hash_bucket* bucket)
 		char buffer[65];
 		unsigned char* key = bucket->key;
 
-		for (size_t i = 0; i < 32; ++i)
+		for (i = 0; i < 32; ++i)
 			snprintf(buffer + (i * 2), 3, "%02x", (int)key[i]);
 
 		printf(state->tty ? "\e[1mDuplicate \e[31m%s\e[39m:\e[0m\n" : "Duplicate %s:\n", buffer);
@@ -559,7 +561,58 @@ static void relink(struct dedupe_state* state, struct hash_bucket* bucket)
 	if (state->dryrun)
 		return;
 
-	// TODO:
+	void* root = talloc_size(state, 0);
+
+	for (i = 1; i < bucket->dummy; ++i)
+	{
+		for (struct path_entry* dpath = ordered[i]->paths; dpath; dpath = dpath->next)
+		{
+			char* dir = talloc_strdup(root, dpath->path);
+			*strrchr(dir, '/') = 0;
+
+			unsigned int r;
+retry:
+#if defined(__linux__)
+			getrandom(&r, sizeof(r), 0);
+#elif defined(__FreeBSD__)
+			arc4random_buf(&r, sizeof(r));
+#else
+			r = (unsigned int)rand();
+#endif
+			char* tmp = talloc_asprintf(root, "%s/.tmp%08X~", dir, r);
+
+			bool linked = false;
+			for (struct path_entry* spath = ordered[0]->paths; spath; spath = spath->next)
+			{
+				if (link(spath->path, tmp) == -1)
+				{
+					if (errno == EEXIST)
+					{
+						talloc_free(tmp);
+						goto retry;
+					}
+
+					perror(spath->path);
+				}
+				else
+				{
+					linked = true;
+					break;
+				}
+			}
+
+			if (linked && rename(tmp, dpath->path) == -1)
+			{
+				perror(tmp);
+				unlink(tmp);
+			}
+
+			talloc_free(tmp);
+			talloc_free(dir);
+		}
+	}
+
+	talloc_free(root);
 }
 
 static int relink_sortcb(const void* p1, const void* p2)
