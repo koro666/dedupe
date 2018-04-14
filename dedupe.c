@@ -5,6 +5,12 @@
 #endif
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifdef __linux__
+#include <sys/xattr.h>
+#endif
+#ifdef __FreeBSD__
+#include <sys/extattr.h>
+#endif
 #include <fcntl.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -30,6 +36,7 @@ struct dedupe_state
 	bool verbose;
 	bool dryrun;
 	bool interactive;
+	bool xattrs;
 
 	dev_t device;
 	size_t dircount;
@@ -189,6 +196,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 		{"verbose", no_argument, NULL, 'v'},
 		{"dry-run", no_argument, NULL, 'n'},
 		{"interactive", no_argument, NULL, 'i'},
+		{"use-xattrs", no_argument, NULL, 'x'},
 		{"help", no_argument, NULL, 'h'},
 		{}
 	};
@@ -198,7 +206,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	memcpy(nargv, argv, argsz);
 
 	int result, index;
-	while ((result = getopt_long(argc, nargv, "bvnih?", long_options, &index)) != -1)
+	while ((result = getopt_long(argc, nargv, "bvnixh?", long_options, &index)) != -1)
 	{
 		switch (result)
 		{
@@ -213,6 +221,9 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 				break;
 			case 'i':
 				state->interactive = true;
+				break;
+			case 'x':
+				state->xattrs = true;
 				break;
 			case 'h':
 			case '?':
@@ -258,6 +269,7 @@ static void print_usage(const char* name)
 		"  -b, --boring      Don't output colors on the terminal.\n"
 		"  -v, --verbose     Print directory and file names as they are being scanned.\n"
 		"  -n, --dry-run     Don't do any write operations to the file system.\n"
+		"  -x, --use-xattrs  Cache file hashes in user extended attributes.\n"
 		"  -i, -interactive  Ask for confirmation before doing anything.\n"
 		"  -h, -?, --help    Show program usage.\n"
 		"\n",
@@ -443,20 +455,43 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 
 	print_progress(state, fpath, progress, state->tohash_count);
 
-	void* data = mmap(NULL, inode->buffer.st_size, PROT_READ, MAP_SHARED, fd, 0);
-	if (data == MAP_FAILED)
+	ssize_t xattr_result = 0;
+	if (state->xattrs)
 	{
-		perror(fpath);
-		close(fd);
-		return;
+#if defined(__linux__)
+		xattr_result = fgetxattr(fd, "user.dedupe.hash", inode->hash, 32);
+#elif defined(__FreeBSD__)
+		xattr_result = extattr_get_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, 32);
+#endif
 	}
 
-	SHA256_CTX ctx;
-	SHA256_Init(&ctx);
-	SHA256_Update(&ctx, data, inode->buffer.st_size);
-	SHA256_Final(inode->hash, &ctx);
+	if (xattr_result != 32)
+	{
+		void* data = mmap(NULL, inode->buffer.st_size, PROT_READ, MAP_SHARED, fd, 0);
+		if (data == MAP_FAILED)
+		{
+			perror(fpath);
+			close(fd);
+			return;
+		}
 
-	munmap(data, inode->buffer.st_size);
+		SHA256_CTX ctx;
+		SHA256_Init(&ctx);
+		SHA256_Update(&ctx, data, inode->buffer.st_size);
+		SHA256_Final(inode->hash, &ctx);
+
+		munmap(data, inode->buffer.st_size);
+
+		if (state->xattrs)
+		{
+#if defined(__linux__)
+			fsetxattr(fd, "user.dedupe.hash", inode->hash, 32, 0);
+#elif defined(__FreeBSD__)
+			extattr_set_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, 32);
+#endif
+		}
+	}
+
 	close(fd);
 
 	struct hash_bucket* bucket = hash_map_insert(state->hash_lookup, inode->hash);

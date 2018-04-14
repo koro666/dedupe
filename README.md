@@ -23,5 +23,6 @@ There are a few options that can be passed as well:
 - `-v` or `--verbose` will print a nice colorful progress as it scans files, as well as for duplicates it found.
 - `-n` or `--dry-run` will not actually do modifications.
 - `-i` or `--interactive` will ask what to do with each duplicate found.
+- `-x` or `--use-xattrs` will use extended attributes to cache the computed file hashes.
 
 There are a few more options, run `dedupe -h` for information.
