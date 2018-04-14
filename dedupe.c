@@ -455,17 +455,29 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 
 	print_progress(state, fpath, progress, state->tohash_count);
 
-	ssize_t xattr_result = 0;
+	bool cached = false;
 	if (state->xattrs)
 	{
+		ssize_t result0, result1;
+		struct timespec mtime;
+
 #if defined(__linux__)
-		xattr_result = fgetxattr(fd, "user.dedupe.hash", inode->hash, 32);
+		result0 = fgetxattr(fd, "user.dedupe.hash", inode->hash, 32);
+		result1 = fgetxattr(fd, "user.dedupe.hash_mtime", &mtime, sizeof(struct timespec));
 #elif defined(__FreeBSD__)
-		xattr_result = extattr_get_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, 32);
+		result0 = extattr_get_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, 32);
+		result1 = extattr_get_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash_mtime", &mtime, sizeof(struct timespec));
+#else
+		result1 = result0 = 0;
 #endif
+
+		cached = result0 == 32 && (result1 == -1 ||
+			(result1 == sizeof(struct timespec) &&
+			inode->buffer.st_mtim.tv_sec == mtime.tv_sec &&
+			inode->buffer.st_mtim.tv_nsec == mtime.tv_nsec));
 	}
 
-	if (xattr_result != 32)
+	if (!cached)
 	{
 		void* data = mmap(NULL, inode->buffer.st_size, PROT_READ, MAP_SHARED, fd, 0);
 		if (data == MAP_FAILED)
@@ -486,8 +498,10 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 		{
 #if defined(__linux__)
 			fsetxattr(fd, "user.dedupe.hash", inode->hash, 32, 0);
+			fsetxattr(fd, "user.dedupe.hash_mtime", &inode->buffer.st_mtim, sizeof(struct timespec), 0);
 #elif defined(__FreeBSD__)
 			extattr_set_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, 32);
+			extattr_set_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash_mtime", &inode->buffer.st_mtim, sizeof(struct timespec));
 #endif
 		}
 	}
