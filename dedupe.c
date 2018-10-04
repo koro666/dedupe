@@ -42,6 +42,9 @@ struct dedupe_state
 	size_t dircount;
 	char** dirs;
 
+	size_t xclcount;
+	char** exclude;
+
 	bool tty;
 	int width;
 	time_t last;
@@ -105,6 +108,7 @@ struct path_entry
 static int parse_cmdline(struct dedupe_state*, int, char**);
 static void print_usage(const char*);
 static void check_terminal(struct dedupe_state*);
+static bool is_excluded(struct dedupe_state*, const char*);
 static void scan_directory(struct dedupe_state*, int, char*, char*);
 static void bucketize_by_size(void*, struct hash_bucket*);
 static void gather_tohash(struct dedupe_state*);
@@ -196,6 +200,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 		{"verbose", no_argument, NULL, 'v'},
 		{"dry-run", no_argument, NULL, 'n'},
 		{"interactive", no_argument, NULL, 'i'},
+		{"exclude", required_argument, NULL, 'e'},
 		{"use-xattrs", no_argument, NULL, 'x'},
 		{"help", no_argument, NULL, 'h'},
 		{}
@@ -205,8 +210,10 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	char** nargv = alloca(argsz);
 	memcpy(nargv, argv, argsz);
 
+	state->exclude = talloc_array(state, char*, argc);
+
 	int result, index;
-	while ((result = getopt_long(argc, nargv, "bvnixh?", long_options, &index)) != -1)
+	while ((result = getopt_long(argc, nargv, "bvnie:xh?", long_options, &index)) != -1)
 	{
 		switch (result)
 		{
@@ -221,6 +228,9 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 				break;
 			case 'i':
 				state->interactive = true;
+				break;
+			case 'e':
+				state->exclude[state->xclcount++] = talloc_strdup(state->exclude, optarg);
 				break;
 			case 'x':
 				state->xattrs = true;
@@ -269,6 +279,7 @@ static void print_usage(const char* name)
 		"  -b, --boring      Don't output colors on the terminal.\n"
 		"  -v, --verbose     Print directory and file names as they are being scanned.\n"
 		"  -n, --dry-run     Don't do any write operations to the file system.\n"
+		"  -e, --exclude     Exclude file or directory name from scan.\n"
 		"  -x, --use-xattrs  Cache file hashes in user extended attributes.\n"
 		"  -i, -interactive  Ask for confirmation before doing anything.\n"
 		"  -h, -?, --help    Show program usage.\n"
@@ -291,6 +302,20 @@ static void check_terminal(struct dedupe_state* state)
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	state->last = ts.tv_sec;
+}
+
+static bool is_excluded(struct dedupe_state* state, const char* name)
+{
+	if (!strcmp(name, ".") || !strcmp(name, ".."))
+		return true;
+
+	for (size_t i = 0; i < state->xclcount; ++i)
+	{
+		if (!strcmp(name, state->exclude[i]))
+			return true;
+	}
+
+	return false;
 }
 
 static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, char* dname)
@@ -323,7 +348,7 @@ static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, cha
 	struct dirent* e;
 	while ((e = readdir(d)))
 	{
-		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+		if (is_excluded(state, e->d_name))
 			continue;
 
 		char* fullpath = talloc_asprintf(dpath, "%s/%s", dpath, e->d_name);
