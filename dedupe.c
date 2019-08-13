@@ -456,14 +456,6 @@ static int gather_tohash_sortcb(const void* p1, const void* p2)
 
 static void hash_inode(struct dedupe_state* state, size_t progress, struct inode_entry* inode)
 {
-	if (!inode->buffer.st_size)
-	{
-		SHA256_CTX ctx;
-		SHA256_Init(&ctx);
-		SHA256_Final(inode->hash, &ctx);
-		return;
-	}
-
 	int fd = -1;
 	char* fpath = NULL;
 	for (struct path_entry* path = inode->paths; path; path = path->next)
@@ -505,20 +497,26 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 
 	if (!cached)
 	{
-		void* data = mmap(NULL, inode->buffer.st_size, PROT_READ, MAP_SHARED, fd, 0);
-		if (data == MAP_FAILED)
+		void* data = NULL;
+		if (inode->buffer.st_size)
 		{
-			perror(fpath);
-			close(fd);
-			return;
+			data = mmap(NULL, inode->buffer.st_size, PROT_READ, MAP_SHARED, fd, 0);
+			if (data == MAP_FAILED)
+			{
+				perror(fpath);
+				close(fd);
+				return;
+			}
 		}
 
 		SHA256_CTX ctx;
 		SHA256_Init(&ctx);
-		SHA256_Update(&ctx, data, inode->buffer.st_size);
+		if (data)
+			SHA256_Update(&ctx, data, inode->buffer.st_size);
 		SHA256_Final(inode->hash, &ctx);
 
-		munmap(data, inode->buffer.st_size);
+		if (data)
+			munmap(data, inode->buffer.st_size);
 
 		if (state->xattrs)
 		{
