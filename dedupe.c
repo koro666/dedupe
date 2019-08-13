@@ -21,6 +21,7 @@
 #endif
 #include <stdio.h>
 #include <stdbool.h>
+#include <fnmatch.h>
 #include <getopt.h>
 #include <time.h>
 #include <talloc.h>
@@ -279,7 +280,7 @@ static void print_usage(const char* name)
 		"  -b, --boring      Don't output colors on the terminal.\n"
 		"  -v, --verbose     Print directory and file names as they are being scanned.\n"
 		"  -n, --dry-run     Don't do any write operations to the file system.\n"
-		"  -e, --exclude     Exclude file or directory name from scan.\n"
+		"  -e, --exclude     Exclude file or directory pattern from scan.\n"
 		"  -x, --use-xattrs  Cache file hashes in user extended attributes.\n"
 		"  -i, -interactive  Ask for confirmation before doing anything.\n"
 		"  -h, -?, --help    Show program usage.\n"
@@ -311,7 +312,7 @@ static bool is_excluded(struct dedupe_state* state, const char* name)
 
 	for (size_t i = 0; i < state->xclcount; ++i)
 	{
-		if (!strcmp(name, state->exclude[i]))
+		if (!fnmatch(state->exclude[i], name, FNM_PATHNAME))
 			return true;
 	}
 
