@@ -706,6 +706,10 @@ static int relink_sortcb(const void* p1, const void* p2)
 		return -1;
 	else if (mt0->tv_nsec > mt1->tv_nsec)
 		return 1;
+	else if (inode0->buffer.st_ino < inode1->buffer.st_ino)
+		return -1;
+	else if (inode0->buffer.st_ino > inode1->buffer.st_ino)
+		return 1;
 	else
 		return 0;
 }
