@@ -96,7 +96,7 @@ struct inode_entry
 	struct inode_entry* next_by_hash;
 
 	struct stat buffer;
-	unsigned char hash[32];
+	unsigned char hash[SHA256_DIGEST_LENGTH];
 	struct path_entry* paths;
 };
 
@@ -131,8 +131,8 @@ static void hash_map_walk(struct hash_map*, void*, void(*)(void*, struct hash_bu
 static size_t hash_ptr_hash(void*);
 static bool hash_ptr_equals(void*, void*);
 
-static size_t hash_buf32_hash(void*);
-static bool hash_buf32_equals(void*, void*);
+static size_t hash_digest_hash(void*);
+static bool hash_digest_equals(void*, void*);
 
 static bool is_prime(size_t);
 static size_t next_prime(size_t);
@@ -143,10 +143,10 @@ static struct hash_descriptor hash_ptr_descriptor =
 	hash_ptr_equals
 };
 
-static struct hash_descriptor hash_buf32_descriptor =
+static struct hash_descriptor hash_digest_descriptor =
 {
-	hash_buf32_hash,
-	hash_buf32_equals
+	hash_digest_hash,
+	hash_digest_equals
 };
 
 int main(int argc, char** argv)
@@ -176,7 +176,7 @@ int main(int argc, char** argv)
 
 	gather_tohash(state);
 
-	state->hash_lookup = hash_map_create(state, &hash_buf32_descriptor, state->tohash_count);
+	state->hash_lookup = hash_map_create(state, &hash_digest_descriptor, state->tohash_count);
 	for (size_t i = 0; i < state->tohash_count; ++i)
 		hash_inode(state, i, state->tohash_list[i]);
 
@@ -482,16 +482,16 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 		struct timespec mtime;
 
 #if defined(__linux__)
-		result0 = fgetxattr(fd, "user.dedupe.hash", inode->hash, 32);
+		result0 = fgetxattr(fd, "user.dedupe.hash", inode->hash, SHA256_DIGEST_LENGTH);
 		result1 = fgetxattr(fd, "user.dedupe.hash_mtime", &mtime, sizeof(struct timespec));
 #elif defined(__FreeBSD__)
-		result0 = extattr_get_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, 32);
+		result0 = extattr_get_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, SHA256_DIGEST_LENGTH);
 		result1 = extattr_get_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash_mtime", &mtime, sizeof(struct timespec));
 #else
 		result1 = result0 = 0;
 #endif
 
-		cached = result0 == 32 && (result1 == -1 ||
+		cached = result0 == SHA256_DIGEST_LENGTH && (result1 == -1 ||
 			(result1 == sizeof(struct timespec) &&
 			inode->buffer.st_mtim.tv_sec == mtime.tv_sec &&
 			inode->buffer.st_mtim.tv_nsec == mtime.tv_nsec));
@@ -523,10 +523,10 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 		if (state->xattrs)
 		{
 #if defined(__linux__)
-			fsetxattr(fd, "user.dedupe.hash", inode->hash, 32, 0);
+			fsetxattr(fd, "user.dedupe.hash", inode->hash, SHA256_DIGEST_LENGTH, 0);
 			fsetxattr(fd, "user.dedupe.hash_mtime", &inode->buffer.st_mtim, sizeof(struct timespec), 0);
 #elif defined(__FreeBSD__)
-			extattr_set_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, 32);
+			extattr_set_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash", inode->hash, SHA256_DIGEST_LENGTH);
 			extattr_set_fd(fd, EXTATTR_NAMESPACE_USER, "dedupe.hash_mtime", &inode->buffer.st_mtim, sizeof(struct timespec));
 #endif
 		}
@@ -574,7 +574,7 @@ static int gather_tolink_sortcb(const void* p1, const void* p2)
 		*bucket0 = *((struct hash_bucket* const*)p1),
 		*bucket1 = *((struct hash_bucket* const*)p2);
 
-	return memcmp(bucket0->key, bucket1->key, 32);
+	return memcmp(bucket0->key, bucket1->key, SHA256_DIGEST_LENGTH);
 }
 
 static void relink(struct dedupe_state* state, struct hash_bucket* bucket)
@@ -587,10 +587,10 @@ static void relink(struct dedupe_state* state, struct hash_bucket* bucket)
 
 	if (state->verbose || state->interactive)
 	{
-		char buffer[65];
+		char buffer[SHA256_DIGEST_LENGTH * 2 + 1];
 		unsigned char* key = bucket->key;
 
-		for (i = 0; i < 32; ++i)
+		for (i = 0; i < SHA256_DIGEST_LENGTH; ++i)
 			snprintf(buffer + (i * 2), 3, "%02x", (int)key[i]);
 
 		printf(state->tty ? "\e[1mDuplicate \e[31m%s\e[39m:\e[0m\n" : "Duplicate %s:\n", buffer);
@@ -600,7 +600,7 @@ static void relink(struct dedupe_state* state, struct hash_bucket* bucket)
 			struct tm tm;
 			localtime_r(&ordered[i]->buffer.st_mtim.tv_sec, &tm);
 
-			strftime(buffer, 65, "%c", &tm);
+			strftime(buffer, sizeof(buffer) / sizeof(char), "%c", &tm);
 
 			printf(
 				state->tty ?
@@ -851,17 +851,17 @@ static bool hash_ptr_equals(void* p1, void* p2)
 	return p1 == p2;
 }
 
-static size_t hash_buf32_hash(void* p)
+static size_t hash_digest_hash(void* p)
 {
 	size_t result = 0;
-	for (size_t *current = p, *end = ((size_t*)p) + (32 / sizeof(size_t)); current < end; ++current)
+	for (size_t *current = p, *end = ((size_t*)p) + (SHA256_DIGEST_LENGTH / sizeof(size_t)); current < end; ++current)
 		result ^= *current;
 	return result;
 }
 
-static bool hash_buf32_equals(void* p1, void* p2)
+static bool hash_digest_equals(void* p1, void* p2)
 {
-	return !memcmp(p1, p2, 32);
+	return !memcmp(p1, p2, SHA256_DIGEST_LENGTH);
 }
 
 // https://stackoverflow.com/a/5694432 impl #5
