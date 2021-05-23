@@ -151,12 +151,13 @@ static struct hash_descriptor hash_buf32_descriptor =
 
 int main(int argc, char** argv)
 {
-	struct dedupe_state* state = talloc_zero(
-		talloc_autofree_context(),
-		struct dedupe_state);
+	struct dedupe_state* state = talloc_zero(NULL, struct dedupe_state);
 
 	if (parse_cmdline(state, argc, argv))
+	{
+		talloc_free(state);
 		return 1;
+	}
 
 	check_terminal(state);
 
@@ -190,6 +191,7 @@ int main(int argc, char** argv)
 	for (size_t i = 0; i < state->tolink_count; ++i)
 		relink(state, state->tolink_list[i]);
 
+	talloc_free(state);
 	return 0;
 }
 
