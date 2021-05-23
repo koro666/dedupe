@@ -258,7 +258,7 @@ static int parse_cmdline(struct dedupe_state* state, int argc, char** argv)
 	}
 
 	if (!state->dircount)
-		state->dirs[state->dircount++] = talloc_strdup(state->dirs, ".");
+		return 0;
 
 	struct stat buffer;
 	if (stat(state->dirs[0], &buffer) == -1)

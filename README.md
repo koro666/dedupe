@@ -16,7 +16,7 @@ Build
 Usage
 -----
 
-Simply run with no arguments in the directory of your choice. Alternatively, you can pass a list of directories to scan.
+Simply pass a list of directories to scan as arguments.
 
 There are a few options that can be passed as well:
 
