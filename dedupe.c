@@ -61,6 +61,9 @@ struct dedupe_state
 
 	size_t tolink_count;
 	struct hash_bucket** tolink_list;
+
+	size_t relinked_count;
+	unsigned long long relinked_size;
 };
 
 struct gather_state
@@ -123,6 +126,7 @@ static int gather_tolink_sortcb(const void*, const void*);
 static void relink(struct dedupe_state*, struct hash_bucket*);
 static int relink_sortcb(const void*, const void*);
 static void print_progress(struct dedupe_state*, const char*, size_t, size_t, unsigned long long, unsigned long long);
+static void print_summary(struct dedupe_state*);
 
 static struct hash_map* hash_map_create(void*, const struct hash_descriptor*, size_t);
 static struct hash_bucket* hash_map_insert(struct hash_map*, void*);
@@ -196,6 +200,8 @@ int main(int argc, char** argv)
 
 	for (size_t i = 0; i < state->tolink_count; ++i)
 		relink(state, state->tolink_list[i]);
+
+	print_summary(state);
 
 	talloc_free(state);
 	return 0;
@@ -699,10 +705,18 @@ retry:
 				}
 			}
 
-			if (linked && rename(tmp, dpath->path) == -1)
+			if (linked)
 			{
-				perror(tmp);
-				unlink(tmp);
+				if (rename(tmp, dpath->path) == -1)
+				{
+					perror(tmp);
+					unlink(tmp);
+				}
+				else
+				{
+					++state->relinked_count;
+					state->relinked_size += ordered[0]->buffer.st_size;
+				}
 			}
 
 			talloc_free(tmp);
@@ -790,6 +804,23 @@ static void print_progress(struct dedupe_state* state, const char* status, size_
 
 	state->last = ts.tv_sec;
 	fflush(stdout);
+}
+
+static void print_summary(struct dedupe_state* state)
+{
+	if (!state->verbose)
+		return;
+
+	if (!state->relinked_count)
+		return;
+
+	printf(
+		state->tty ?
+			"\e[1mPerformed \e[32m%zu\e[39m relink%s, saved \e[32m%llu\e[39m bytes.\e[0m\n" :
+			"Performed %zu relink%s, saved %llu bytes.\n",
+		state->relinked_count,
+		state->relinked_count > 1 ? "s" : "",
+		state->relinked_size);
 }
 
 static struct hash_map* hash_map_create(void* ctx, const struct hash_descriptor* descriptor, size_t expected)
