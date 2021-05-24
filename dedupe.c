@@ -54,6 +54,7 @@ struct dedupe_state
 	struct hash_map* size_lookup;
 
 	size_t tohash_count;
+	unsigned long long tohash_size;
 	struct inode_entry** tohash_list;
 
 	struct hash_map* hash_lookup;
@@ -115,13 +116,13 @@ static void bucketize_by_size(void*, struct hash_bucket*);
 static void gather_tohash(struct dedupe_state*);
 static void gather_tohash_walkcb(void*, struct hash_bucket*);
 static int gather_tohash_sortcb(const void*, const void*);
-static void hash_inode(struct dedupe_state*, size_t, struct inode_entry*);
+static void hash_inode(struct dedupe_state*, size_t, unsigned long long, struct inode_entry*);
 static void gather_tolink(struct dedupe_state*);
 static void gather_tolink_walkcb(void*, struct hash_bucket*);
 static int gather_tolink_sortcb(const void*, const void*);
 static void relink(struct dedupe_state*, struct hash_bucket*);
 static int relink_sortcb(const void*, const void*);
-static void print_progress(struct dedupe_state*, const char*, size_t, size_t);
+static void print_progress(struct dedupe_state*, const char*, size_t, size_t, unsigned long long, unsigned long long);
 
 static struct hash_map* hash_map_create(void*, const struct hash_descriptor*, size_t);
 static struct hash_bucket* hash_map_insert(struct hash_map*, void*);
@@ -176,9 +177,14 @@ int main(int argc, char** argv)
 
 	gather_tohash(state);
 
+	unsigned long long hashed = 0;
 	state->hash_lookup = hash_map_create(state, &hash_digest_descriptor, state->tohash_count);
 	for (size_t i = 0; i < state->tohash_count; ++i)
-		hash_inode(state, i, state->tohash_list[i]);
+	{
+		struct inode_entry* inode = state->tohash_list[i];
+		hash_inode(state, i, hashed, inode);
+		hashed += inode->buffer.st_size;
+	}
 
 	if (state->verbose && state->tty)
 	{
@@ -323,7 +329,7 @@ static bool is_excluded(struct dedupe_state* state, const char* name)
 
 static void scan_directory(struct dedupe_state* state, int pfd, char* dpath, char* dname)
 {
-	print_progress(state, dpath, 0, -1);
+	print_progress(state, dpath, 0, 0, 0, 0);
 
 	int fd = openat(pfd, dname, O_RDONLY|O_CLOEXEC|O_DIRECTORY);
 	if (fd == -1)
@@ -413,6 +419,7 @@ static void gather_tohash(struct dedupe_state* state0)
 	struct gather_state state1 = { state0, 16 };
 
 	state0->tohash_count = 0;
+	state0->tohash_size = 0;
 	state0->tohash_list = talloc_array(state0, struct inode_entry*, state1.capacity);
 
 	hash_map_walk(state0->size_lookup, &state1, gather_tohash_walkcb);
@@ -436,6 +443,7 @@ static void gather_tohash_walkcb(void* state0, struct hash_bucket* size_bucket)
 		}
 
 		state2->tohash_list[state2->tohash_count++] = inode;
+		state2->tohash_size += inode->buffer.st_size;
 	}
 }
 
@@ -456,7 +464,7 @@ static int gather_tohash_sortcb(const void* p1, const void* p2)
 		return 0;
 }
 
-static void hash_inode(struct dedupe_state* state, size_t progress, struct inode_entry* inode)
+static void hash_inode(struct dedupe_state* state, size_t progress, unsigned long long total, struct inode_entry* inode)
 {
 	int fd = -1;
 	char* fpath = NULL;
@@ -473,7 +481,7 @@ static void hash_inode(struct dedupe_state* state, size_t progress, struct inode
 	if (fd == -1)
 		return;
 
-	print_progress(state, fpath, progress, state->tohash_count);
+	print_progress(state, fpath, progress, state->tohash_count, total, state->tohash_size);
 
 	bool cached = false;
 	if (state->xattrs)
@@ -604,10 +612,10 @@ static void relink(struct dedupe_state* state, struct hash_bucket* bucket)
 
 			printf(
 				state->tty ?
-					" \e[1m#%lu\e[0m (%lu bytes) \e[2mmodified %s\e[0m\n" :
-					" #%lu (%lu bytes) modified %s\n",
+					" \e[1m#%lu\e[0m (%llu bytes) \e[2mmodified %s\e[0m\n" :
+					" #%lu (%llu bytes) modified %s\n",
 				(unsigned long)ordered[i]->buffer.st_ino,
-				(unsigned long)ordered[i]->buffer.st_size,
+				(unsigned long long)ordered[i]->buffer.st_size,
 				buffer
 			);
 
@@ -716,7 +724,7 @@ static int relink_sortcb(const void* p1, const void* p2)
 		return 0;
 }
 
-static void print_progress(struct dedupe_state* state, const char* status, size_t count, size_t max)
+static void print_progress(struct dedupe_state* state, const char* status, size_t count, size_t max, unsigned long long size, unsigned long long total)
 {
 	if (!state->verbose)
 		return;
@@ -727,18 +735,17 @@ static void print_progress(struct dedupe_state* state, const char* status, size_
 	if (state->last == ts.tv_sec)
 		return;
 
-	bool progress = max != -1;
 	if (state->tty)
 	{
 		fputs("\e[u\e[J", stdout);
 
-		if (progress)
+		if (total)
 		{
-			size_t cmax = (state->width >= 3 ? state->width - 3 : 1);
-			size_t ccount = (count * cmax) / max;
-			size_t cncount = cmax - ccount;
+			unsigned long long cmax = (state->width >= 3 ? state->width - 3 : 1);
+			unsigned long long ccount = (size * cmax) / total;
+			unsigned long long cncount = cmax - ccount;
 
-			char *buf0 = alloca(ccount + 1);
+			char* buf0 = alloca(ccount + 1);
 			memset(buf0, 0x7C, ccount);
 			buf0[ccount] = 0;
 
@@ -746,19 +753,22 @@ static void print_progress(struct dedupe_state* state, const char* status, size_
 			memset(buf1, 0x20, cncount);
 			buf1[cncount] = 0;
 
-			printf("\e[0;1m[\e[0;32;42m%s\e[0m%s\e[1m]\n[%zu/%zu]\e[0m ", buf0, buf1, count, max);
+			printf("\e[0;1m[\e[0;32;42m%s\e[0m%s\e[1m]\e[0m\n", buf0, buf1);
 		}
+
+		if (max)
+			printf("\e[0;1m[%zu/%zu]\e[0m ", count, max);
 		else
-		{
 			printf("\e[0;1m[%c]\e[0m ", "-\\|/"[ts.tv_sec & 3]);
-		}
 
 		printf("%s\n", status);
 	}
 	else
 	{
-		if (progress)
+		if (max)
 			printf("[%zu/%zu] ", count, max);
+		if (total)
+			printf("[%llu/%llu] ", size, total);
 
 		printf("%s\n", status);
 	}
