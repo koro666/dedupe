@@ -507,7 +507,7 @@ static void hash_inode(struct dedupe_state* state, size_t progress, unsigned lon
 
 	if (!cached)
 	{
-		void* data = NULL;
+		unsigned char* data = NULL;
 		if (inode->buffer.st_size)
 		{
 			data = mmap(NULL, inode->buffer.st_size, PROT_READ, MAP_SHARED, fd, 0);
@@ -521,8 +521,23 @@ static void hash_inode(struct dedupe_state* state, size_t progress, unsigned lon
 
 		SHA256_CTX ctx;
 		SHA256_Init(&ctx);
+
 		if (data)
-			SHA256_Update(&ctx, data, inode->buffer.st_size);
+		{
+			const size_t chunk_size = 0x2000000;
+			for (size_t offset = 0; offset < inode->buffer.st_size; offset += chunk_size)
+			{
+				if (offset)
+					print_progress(state, fpath, progress, state->tohash_count, total + offset, state->tohash_size);
+
+				size_t remaining = inode->buffer.st_size - offset;
+				if (remaining > chunk_size)
+					remaining = chunk_size;
+
+				SHA256_Update(&ctx, data + offset, remaining);
+			}
+		}
+
 		SHA256_Final(inode->hash, &ctx);
 
 		if (data)
