@@ -138,13 +138,13 @@ static bool hash_digest_equals(void*, void*);
 static bool is_prime(size_t);
 static size_t next_prime(size_t);
 
-static struct hash_descriptor hash_ptr_descriptor =
+static const struct hash_descriptor hash_ptr_descriptor =
 {
 	hash_ptr_hash,
 	hash_ptr_equals
 };
 
-static struct hash_descriptor hash_digest_descriptor =
+static const struct hash_descriptor hash_digest_descriptor =
 {
 	hash_digest_hash,
 	hash_digest_equals
